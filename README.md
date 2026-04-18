@@ -8,11 +8,53 @@
 
 <img width="502" height="323" alt="视频封面" src="https://github.com/user-attachments/assets/a72e1683-be42-44d2-a3ae-7686517728fd" />
 
+## 项目结构
+
+```
+Hero_lobshot/
+├── src/
+│   ├── bringup/                # 启动配置
+│   │   ├── launch/
+│   │   │   └── sniper.launch.py  # 主启动文件
+│   │   ├── CMakeLists.txt
+│   │   └── package.xml
+│   ├── doorlock_decoder/       # 视频解码节点
+│   │   ├── doorlock_decoder/
+│   │   │   ├── __init__.py
+│   │   │   ├── py.typed
+│   │   │   └── video_decoder_node.py
+│   │   ├── resource/
+│   │   ├── package.xml
+│   │   ├── setup.cfg
+│   │   └── setup.py
+│   ├── doorlock_sniper/        # 视频编码节点
+│   │   ├── include/
+│   │   │   └── doorlock_sniper/
+│   │   │       ├── doorlock_comm.hpp
+│   │   │       └── video_encoder_node.hpp
+│   │   ├── msg/
+│   │   │   └── VideoPacket.msg  # 视频数据包消息定义
+│   │   ├── src/
+│   │   │   ├── doorlock_comm.cpp
+│   │   │   └── video_encoder_node.cpp
+│   │   ├── CMakeLists.txt
+│   │   └── package.xml
+│   └── hik_camera/             # 海康相机驱动
+│       ├── config/
+│       │   └── camera_6mm_MV-CS016-10UC.yaml  # 相机配置文件
+│       ├── src/
+│       │   └── hik_camera_node.cpp
+│       ├── CMakeLists.txt
+│       └── package.xml
+├── .gitignore
+└── README.md
+```
+
 ## 环境要求
 
 - Ubuntu Linux
-- ROS 2 kilted。 其他版本例如Humble可能要改一些QoS之类的API。
-- 海康相机的 MVS SDK。
+- ROS 2 kilted（其他版本如Humble可能需要修改QoS等API）
+- 海康相机的 MVS SDK
 
 ## 安装依赖
 
@@ -34,20 +76,58 @@ sudo apt install -y \
 rosdep install --from-paths src --ignore-src -r -y
 ```
 
-本工程的相机图像采集代码由rm-vision项目修改而来；
-`hik_camera` 依赖以下路径，确保路径里面文件都在就可以。
+## 相机依赖
+
+`hik_camera` 包依赖海康相机的MVS SDK，确保以下路径存在：
 
 - 头文件：`/opt/MVS/include`
 - 库文件：`/opt/MVS/lib/64`
 
 ## 编译启动
-先`source`一下ROS的`setup.bash`。然后：
+
+1. 先`source` ROS的`setup.bash`：
+
+```bash
+source /opt/ros/kilted/setup.bash
+```
+
+2. 编译项目：
+
 ```bash
 colcon build
+```
 
+3. 加载编译结果：
+
+```bash
 source install/setup.bash
+```
+
+4. 启动系统：
+
+```bash
 ros2 launch bringup sniper.launch.py
 ```
-`sniper.launch.py`里面可以修改启动参数，比如图传分辨率，准星位置，dump图片用于调试，等等。详见文件内注释。
 
-本工程仅为一个演示工程，开发过程中使用了LLM作为辅助。欢迎大家基于这个思路开发更好的自定义客户端。
+## 启动参数说明
+
+在`sniper.launch.py`文件中可以修改以下参数：
+
+- 图传分辨率
+- 准星位置
+- 是否dump图片用于调试
+- 其他相关配置
+
+详见文件内注释。
+
+## 工作原理
+
+1. **hik_camera_node**：负责从海康相机采集图像
+2. **video_encoder_node**：对图像进行编码压缩，生成低带宽视频流
+3. **video_decoder_node**：接收并解码视频流，显示观测画面
+
+## 注意事项
+
+- 本工程仅为演示工程，开发过程中使用了LLM作为辅助
+- 欢迎基于此思路开发更好的自定义客户端
+- 如有问题请参考演示视频和社区开源报告
