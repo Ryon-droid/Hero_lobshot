@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>doorlock_decoder</name>
+  <version>0.1.0</version>
+  <description>Doorlock video decoder - Python node</description>
+  <maintainer email="dev@example.com">dev</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>doorlock_sniper</depend>  <!-- 为了 VideoPacket 消息 -->
+
+  <!-- Python 依赖（rosdep 不会自动处理 pip 包，需手动安装） -->
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-av</exec_depend>
+  
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

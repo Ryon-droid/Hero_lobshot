@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>doorlock_sniper</name>
+  <version>0.1.0</version>
+  <description>
+    Doorlock sniper system - Video encoding node with H264 compression and chunking.
+    Composable node for zero-copy intra-process communication with camera driver.
+  </description>
+  <maintainer email="dev@example.com">developer</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>std_msgs</depend>
+  <depend>libopencv-dev</depend>
+  
+  <!-- GStreamer 依赖 -->
+  <depend>libgstreamer1.0-dev</depend>
+  <depend>libgstreamer-plugins-base1.0-dev</depend>
+  
+  <!-- 消息运行时 -->
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  
+  <!-- 声明为消息接口包 -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
