@@ -1,0 +1,275 @@
+syntax = "proto3";
+
+package rm_custom_client;
+
+message KeyboardMouseControl {
+  optional int32 mouse_x = 1;
+  optional int32 mouse_y = 2;
+  optional int32 mouse_z = 3;
+  optional bool left_button_down = 4;
+  optional bool right_button_down = 5;
+  optional uint32 keyboard_value = 6;
+  optional bool mid_button_down = 7;
+}
+
+message CustomControl {
+  optional bytes data = 1;
+}
+
+message GameStatus {
+  optional uint32 current_round = 1;
+  optional uint32 total_rounds = 2;
+  optional uint32 red_score = 3;
+  optional uint32 blue_score = 4;
+  optional uint32 current_stage = 5;
+  optional int32 stage_countdown_sec = 6;
+  optional int32 stage_elapsed_sec = 7;
+  optional bool is_paused = 8;
+}
+
+message GlobalUnitStatus {
+  optional uint32 base_health = 1;
+  optional uint32 base_status = 2;
+  optional uint32 base_shield = 3;
+  optional uint32 outpost_health = 4;
+  optional uint32 outpost_status = 5;
+  optional uint32 enemy_base_health = 6;
+  optional uint32 enemy_base_status = 7;
+  optional uint32 enemy_base_shield = 8;
+  optional uint32 enemy_outpost_health = 9;
+  optional uint32 enemy_outpost_status = 10;
+  repeated uint32 robot_health = 11;
+  repeated int32 robot_bullets = 12;
+  optional uint32 total_damage_ally = 13;
+  optional uint32 total_damage_enemy = 14;
+}
+
+message GlobalLogisticsStatus {
+  optional uint32 remaining_economy = 1;
+  optional uint64 total_economy_obtained = 2;
+  optional uint32 tech_level = 3;
+  optional uint32 encryption_level = 4;
+}
+
+message GlobalSpecialMechanism {
+  repeated uint32 mechanism_id = 1;
+  repeated int32 mechanism_time_sec = 2;
+}
+
+message Event {
+  optional int32 event_id = 1;
+  optional string param = 2;
+}
+
+message RobotInjuryStat {
+  optional uint32 total_damage = 1;
+  optional uint32 collision_damage = 2;
+  optional uint32 small_projectile_damage = 3;
+  optional uint32 large_projectile_damage = 4;
+  optional uint32 dart_splash_damage = 5;
+  optional uint32 module_offline_damage = 6;
+  optional uint32 offline_damage = 7;
+  optional uint32 penalty_damage = 8;
+  optional uint32 server_kill_damage = 9;
+  optional uint32 killer_id = 10;
+}
+
+message RobotRespawnStatus {
+  optional bool is_pending_respawn = 1;
+  optional uint32 total_respawn_progress = 2;
+  optional uint32 current_respawn_progress = 3;
+  optional bool can_free_respawn = 4;
+  optional uint32 gold_cost_for_respawn = 5;
+  optional bool can_pay_for_respawn = 6;
+}
+
+message RobotStaticStatus {
+  optional uint32 connection_state = 1;
+  optional uint32 field_state = 2;
+  optional uint32 alive_state = 3;
+  optional uint32 robot_id = 4;
+  optional uint32 robot_type = 5;
+  optional uint32 performance_system_shooter = 6;
+  optional uint32 performance_system_chassis = 7;
+  optional uint32 level = 8;
+  optional uint32 max_health = 9;
+  optional uint32 max_heat = 10;
+  optional float heat_cooldown_rate = 11;
+  optional uint32 max_power = 12;
+  optional uint32 max_buffer_energy = 13;
+  optional uint32 max_chassis_energy = 14;
+}
+
+message RobotDynamicStatus {
+  optional uint32 current_health = 1;
+  optional float current_heat = 2;
+  optional float last_projectile_fire_rate = 3;
+  optional uint32 current_chassis_energy = 4;
+  optional uint32 current_buffer_energy = 5;
+  optional uint32 current_experience = 6;
+  optional uint32 experience_for_upgrade = 7;
+  optional uint32 total_projectiles_fired = 8;
+  optional uint32 remaining_ammo = 9;
+  optional bool is_out_of_combat = 10;
+  optional uint32 out_of_combat_countdown = 11;
+  optional bool can_remote_heal = 12;
+  optional bool can_remote_ammo = 13;
+}
+
+message RobotModuleStatus {
+  optional uint32 power_manager = 1;
+  optional uint32 rfid = 2;
+  optional uint32 light_strip = 3;
+  optional uint32 small_shooter = 4;
+  optional uint32 big_shooter = 5;
+  optional uint32 uwb = 6;
+  optional uint32 armor = 7;
+  optional uint32 video_transmission = 8;
+  optional uint32 capacitor = 9;
+  optional uint32 main_controller = 10;
+  optional uint32 laser_detection_module = 11;
+}
+
+message RobotPosition {
+  optional float x = 1;
+  optional float y = 2;
+  optional float z = 3;
+  optional float yaw = 4;
+  optional uint32 robot_id = 5;
+}
+
+message Buff {
+  optional uint32 robot_id = 1;
+  optional uint32 buff_type = 2;
+  optional int32 buff_level = 3;
+  optional uint32 buff_max_time = 4;
+  optional uint32 buff_left_time = 5;
+}
+
+message PenaltyInfo {
+  optional uint32 penalty_type = 1;
+  optional uint32 penalty_effect_sec = 2;
+  optional uint32 total_penalty_num = 3;
+}
+
+message RobotPathPlanInfo {
+  optional uint32 intention = 1;
+  optional uint32 start_pos_x = 2;
+  optional uint32 start_pos_y = 3;
+  repeated int32 offset_x = 4 [packed = true];
+  repeated int32 offset_y = 5 [packed = true];
+  optional uint32 sender_id = 6;
+}
+
+message MapClickInfoNotify {
+  optional uint32 is_send_all = 1;
+  optional bytes robot_id = 2;
+  optional uint32 mode = 3;
+  optional uint32 enemy_id = 4;
+  optional uint32 ascii = 5;
+  optional uint32 type = 6;
+  optional float map_x = 7;
+  optional float map_y = 8;
+}
+
+message RadarSingleRobotInfo {
+  optional uint32 target_pos_x = 1;
+  optional uint32 target_pos_y = 2;
+  optional uint32 is_high_light = 3;
+}
+
+message RadarInfoToClient {
+  repeated RadarSingleRobotInfo radar_robot_info = 1;
+}
+
+message CustomByteBlock {
+  optional bytes data = 1;
+}
+
+message AssemblyCommand {
+  optional uint32 operation = 1;
+  optional uint32 difficulty = 2;
+}
+
+message TechCoreMotionStateSync {
+  optional uint32 maximum_difficulty_level = 1;
+  optional uint32 basic_state = 2;
+  optional uint32 putin_state = 3;
+  optional uint32 move_state = 4;
+  optional uint32 rotate_state = 5;
+  optional uint32 enemy_core_status = 6;
+  optional uint32 remain_time_all = 7;
+  optional uint32 remain_time_step = 8;
+}
+
+message RobotPerformanceSelectionCommand {
+  optional uint32 shooter = 1;
+  optional uint32 chassis = 2;
+  optional uint32 sentry_control = 3;
+}
+
+message RobotPerformanceSelectionSync {
+  optional uint32 shooter = 1;
+  optional uint32 chassis = 2;
+  optional uint32 sentry_control = 3;
+}
+
+message CommonCommand {
+  optional uint32 cmd_type = 1;
+  optional uint32 param = 2;
+}
+
+message HeroDeployModeEventCommand {
+  optional uint32 mode = 1;
+}
+
+message DeployModeStatusSync {
+  optional uint32 status = 1;
+}
+
+message RuneActivateCommand {
+  optional uint32 activate = 1;
+}
+
+message RuneStatusSync {
+  optional uint32 rune_status = 1;
+  optional uint32 activated_arms = 2;
+  optional float average_rings = 3;
+}
+
+message SentryStatusSync {
+  optional uint32 posture_id = 1;
+  optional bool is_weakened = 2;
+}
+
+message DartCommand {
+  optional uint32 target_id = 1;
+  optional bool open = 2;
+  optional bool launch_confirm = 3;
+}
+
+message DartSelectTargetStatusSync {
+  optional uint32 target_id = 1;
+  optional uint32 open = 2;
+}
+
+message SentryCtrlCommand {
+  optional uint32 command_id = 1;
+}
+
+message SentryCtrlResult {
+  optional uint32 command_id = 1;
+  optional uint32 result_code = 2;
+}
+
+message AirSupportCommand {
+  optional uint32 command_id = 1;
+}
+
+message AirSupportStatusSync {
+  optional uint32 airsupport_status = 1;
+  optional uint32 left_time = 2;
+  optional uint32 cost_coins = 3;
+  optional uint32 is_being_targeted = 4;
+  optional uint32 shooter_status = 5;
+}

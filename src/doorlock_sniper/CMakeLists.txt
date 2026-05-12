@@ -5,6 +5,9 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic -O2)
 endif()
 
+# 编译选项：使用UDP协议（默认关闭，使用串口）
+option(USE_UDP "Use UDP protocol instead of serial" OFF)
+
 # 查找依赖
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -14,7 +17,11 @@ find_package(cv_bridge REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-find_package(serial REQUIRED)
+
+# 如果不使用UDP，则需要serial库
+if(NOT USE_UDP)
+  find_package(serial REQUIRED)
+endif()
 
 # 查找 GStreamer 1.0
 find_package(PkgConfig REQUIRED)
@@ -52,8 +59,17 @@ ament_target_dependencies(video_encoder_node
   cv_bridge
   std_msgs
   OpenCV
-  serial
 )
+
+# 如果不使用UDP，则链接serial库
+if(NOT USE_UDP)
+  ament_target_dependencies(video_encoder_node serial)
+endif()
+
+# 添加UDP编译定义
+if(USE_UDP)
+  target_compile_definitions(video_encoder_node PRIVATE USE_UDP)
+endif()
 
 # 链接 GStreamer 库
 target_link_libraries(video_encoder_node

@@ -1,0 +1,21 @@
+[project]
+name = "rm-custom-client"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "grpcio-tools>=1.80.0",
+    "paho-mqtt>=2.1.0",
+    "pillow>=12.2.0",
+    "protobuf>=6.33.6",
+]
+
+[project.scripts]
+rm-custom-client = "rm_custom_client.cli:main"
+rm-custom-client-gui = "rm_custom_client.gui:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true

@@ -16,7 +16,7 @@ setup(
     zip_safe=True,
     maintainer='dev',
     maintainer_email='dev@example.com',
-    description='H264 video decoder for doorlock',
+    description='HEVC video decoder for doorlock',
     license='MIT',
     entry_points={
         'console_scripts': [

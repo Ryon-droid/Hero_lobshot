@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>  // 为 memcpy/memset
 #include <filesystem>
 #include <iomanip>
@@ -22,7 +23,7 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
   frame_count_(0),
   display_running_(false)    // 最后初始化
 {
-  constexpr int kVideoPacketBytes = 150;
+  constexpr int kVideoPacketBytes = 300;
 
   param_input_topic_ = this->declare_parameter("input_topic", "/image_raw");
   param_crop_size_ = this->declare_parameter("crop_size", 800);
@@ -44,6 +45,7 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
   param_bandwidth_window_s_ = this->declare_parameter("bandwidth_window_s", 2.0);
   param_max_tx_delay_s_ = this->declare_parameter("max_tx_delay_s", 1.0);
   param_enable_display_ = this->declare_parameter("enable_display", true);
+  param_fixed_test_payload_mode_ = this->declare_parameter("fixed_test_payload_mode", false);
   param_x264_preset_ = this->declare_parameter("x264_preset", std::string("auto"));
   param_debug_dump_enable_ = this->declare_parameter("debug_dump_enable", false);
   param_debug_dump_every_n_frames_ = this->declare_parameter("debug_dump_every_n_frames", 20);
@@ -52,8 +54,9 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
   param_debug_dump_save_static_ = this->declare_parameter("debug_dump_save_static", true);
   param_debug_dump_save_final_ = this->declare_parameter("debug_dump_save_final", true);
   param_debug_dump_dir_ = this->declare_parameter("debug_dump_dir", std::string("sniper_debug_imgs"));
-  param_com_port_ = this->declare_parameter("com_port", "/dev/ttyUSB0");
-  param_baudrate_ = this->declare_parameter("baudrate", 115200);
+  param_com_port_ = this->declare_parameter("com_port", "/dev/ttyACM0");
+  param_baudrate_ = this->declare_parameter("baudrate", 921600);
+  param_send_inner_packet_only_ = this->declare_parameter("send_inner_packet_only", false);
 
   if (param_output_fps_ < 1) {
     RCLCPP_WARN(this->get_logger(), "Invalid output_fps=%d, clamp to 1", param_output_fps_);
@@ -184,19 +187,35 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
     }
   }
 
-  image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-    param_input_topic_,
-    rclcpp::SensorDataQoS(),
-    std::bind(&VideoEncoderNode::image_callback, this, std::placeholders::_1));
+  if (!param_fixed_test_payload_mode_) {
+    image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+      param_input_topic_,
+      rclcpp::SensorDataQoS(),
+      std::bind(&VideoEncoderNode::image_callback, this, std::placeholders::_1));
+  } else {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "fixed_test_payload_mode enabled: bypass camera/GStreamer and send synthetic 0x0310 payloads");
+  }
 
   packet_pub_ = this->create_publisher<doorlock_sniper::msg::VideoPacket>(
     "video_stream",
     rclcpp::QoS(rclcpp::KeepLast(3000)).reliable());
 
-  initialize_gstreamer();
+  if (!param_fixed_test_payload_mode_) {
+    initialize_gstreamer();
+  }
   initialize_communication();
 
-  if (param_enable_display_) {
+  constexpr int kFixedTxHz = 48;
+  const auto tx_period_us = std::chrono::microseconds(1000000 / kFixedTxHz);
+
+  // 固定 48Hz 发送；可选发送完整 RM 外层包，或只发送 300B 内层包。
+  send_timer_ = this->create_wall_timer(
+    tx_period_us,
+    std::bind(&VideoEncoderNode::send_packet_timer_callback, this));
+
+  if (param_enable_display_ && !param_fixed_test_payload_mode_) {
     display_running_ = true;
     display_thread_ = std::thread(&VideoEncoderNode::display_loop, this);
   }
@@ -204,7 +223,7 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
   RCLCPP_INFO(this->get_logger(),
     "VideoEncoderNode: crop=%d -> %dx%d@%dfps %dkbps, packets=%dbytes, static_simplify=%s, "
     "motion_open(y=%d,x=%d), trail=%df disable@%.0f%% mono=%s, "
-    "tx_limit=%.2fkB/s@%.2fs max_delay=%.2fs x264_preset=%s, "
+    "tx_limit=%.2fkB/s@%.2fs max_delay=%.2fs tx_rate=%dHz tx_period=%ldus wire_packet=%zub tx_mode=%s source=%s x264_preset=%s, "
     "comm_port=%s baudrate=%d",
     param_crop_size_, param_output_size_, param_output_size_,
     param_output_fps_, param_target_bitrate_, param_packet_size_,
@@ -213,6 +232,9 @@ VideoEncoderNode::VideoEncoderNode(const rclcpp::NodeOptions & options)
     param_motion_trail_frames_, param_trail_disable_motion_ratio_ * 100.0,
     param_force_monochrome_ ? "on" : "off",
     param_bandwidth_limit_kbytes_, param_bandwidth_window_s_, param_max_tx_delay_s_,
+    kFixedTxHz, tx_period_us.count(), sizeof(doorlock_sniper::CommFrame),
+    param_send_inner_packet_only_ ? "inner_only" : "rm_outer",
+    param_fixed_test_payload_mode_ ? "synthetic" : "hevc",
     param_x264_preset_.c_str(),
     param_com_port_.c_str(), param_baudrate_);
 }
@@ -235,11 +257,11 @@ void VideoEncoderNode::initialize_gstreamer()
   appsrc_ = gst_element_factory_make("appsrc", "source");
   appsink_ = gst_element_factory_make("appsink", "sink");
   GstElement *convert = gst_element_factory_make("videoconvert", "convert");
-  GstElement *encoder = gst_element_factory_make("x264enc", "encoder");
-  GstElement *parser = gst_element_factory_make("h264parse", "parser");
+  GstElement *encoder = gst_element_factory_make("x265enc", "encoder");
+  GstElement *parser = gst_element_factory_make("h265parse", "parser");
 
   if (!pipeline_ || !appsrc_ || !appsink_ || !convert || !encoder || !parser) {
-    RCLCPP_FATAL(this->get_logger(), "GStreamer element creation failed");
+    RCLCPP_FATAL(this->get_logger(), "GStreamer element creation failed (x265enc requires gstreamer1.0-plugins-bad)");
     return;
   }
 
@@ -260,91 +282,64 @@ void VideoEncoderNode::initialize_gstreamer()
   gst_caps_unref(caps);
 
   const bool low_bitrate_mode = (param_target_bitrate_ <= 80);
-  const int key_int = std::max(8 * param_output_fps_, 30);
-  const int default_speed_preset = low_bitrate_mode ? 9 : 3;  // veryslow / veryfast
-  int speed_preset = default_speed_preset;
-  std::string preset_lower = param_x264_preset_;
-  std::transform(
-    preset_lower.begin(), preset_lower.end(), preset_lower.begin(),
-    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  const int key_int = low_bitrate_mode ?
+    std::max(param_output_fps_, 30) :
+    std::max(param_output_fps_ / 2, 20);
 
-  if (!preset_lower.empty() && preset_lower != "auto") {
-    if (preset_lower == "ultrafast") speed_preset = 1;
-    else if (preset_lower == "superfast") speed_preset = 2;
-    else if (preset_lower == "veryfast") speed_preset = 3;
-    else if (preset_lower == "faster") speed_preset = 4;
-    else if (preset_lower == "fast") speed_preset = 5;
-    else if (preset_lower == "medium") speed_preset = 6;
-    else if (preset_lower == "slow") speed_preset = 7;
-    else if (preset_lower == "slower") speed_preset = 8;
-    else if (preset_lower == "veryslow") speed_preset = 9;
-    else if (preset_lower == "placebo") speed_preset = 10;
-    else {
-      RCLCPP_WARN(
-        this->get_logger(),
-        "Unknown x264_preset='%s', fallback to auto default",
-        param_x264_preset_.c_str());
-      speed_preset = default_speed_preset;
-    }
+  std::string preset_str = param_x264_preset_;
+  if (preset_str.empty() || preset_str == "auto") {
+    preset_str = low_bitrate_mode ? "slow" : "medium";
   }
 
-  if (low_bitrate_mode) {
-    g_object_set(
-      G_OBJECT(encoder),
-      "bitrate", param_target_bitrate_,
-      "speed-preset", speed_preset,
-      "tune", 0,                  // no tuning, favor efficiency
-      "byte-stream", TRUE,
-      "key-int-max", key_int,     // 减少 I 帧开销
-      "bframes", 4,
-      "rc-lookahead", 40,
-      "sync-lookahead", 20,
-      "sliced-threads", FALSE,
-      "ref", 5,
-      "aud", TRUE,
-      "vbv-buf-capacity", 500,
-      "option-string", "repeat-headers=1:scenecut=0:aq-mode=2:aq-strength=1.2:mbtree=1:qcomp=0.75:subme=8:trellis=2:deblock=1,1:force-cfr=1",
-      "pass", 0,
-      nullptr);
-  } else {
-    g_object_set(
-      G_OBJECT(encoder),
-      "bitrate", param_target_bitrate_,
-      "speed-preset", speed_preset,
-      "tune", 0x00000004,         // zerolatency
-      "byte-stream", TRUE,
-      "key-int-max", 2 * param_output_fps_,
-      "bframes", 0,
-      "rc-lookahead", 0,
-      "sync-lookahead", 0,
-      "sliced-threads", TRUE,
-      "aud", TRUE,
-      "option-string", "repeat-headers=1:scenecut=0:ref=1:force-cfr=1",
-      "pass", 0,
-      nullptr);
-  }
+  // x265enc speed-preset is enum, map name to integer value
+  int speed_preset = 6; // default medium
+  if (preset_str == "ultrafast") speed_preset = 1;
+  else if (preset_str == "superfast") speed_preset = 2;
+  else if (preset_str == "veryfast") speed_preset = 3;
+  else if (preset_str == "faster") speed_preset = 4;
+  else if (preset_str == "fast") speed_preset = 5;
+  else if (preset_str == "medium") speed_preset = 6;
+  else if (preset_str == "slow") speed_preset = 7;
+  else if (preset_str == "slower") speed_preset = 8;
+  else if (preset_str == "veryslow") speed_preset = 9;
+  else if (preset_str == "placebo") speed_preset = 10;
 
-  // 确保下游看到可流式重组的 Annex-B 字节流，并周期重复 SPS/PPS
+  // Tune x265 for low-latency low-bitrate operation on the 0x0310 link.
+  // We favor a steadier AU output rate and more frequent recovery points over
+  // absolute compression efficiency so the custom client sees a smoother stream.
+  g_object_set(
+    G_OBJECT(encoder),
+    "bitrate", param_target_bitrate_,
+    "key-int-max", key_int,
+    "speed-preset", speed_preset,
+    "tune", 4,  // zerolatency
+    "option-string",
+    low_bitrate_mode ?
+      "bframes=0:rc-lookahead=8:repeat-headers=1:aud=1:scenecut=0:aq-mode=2:aq-strength=1.0:info=0"
+      : "bframes=0:rc-lookahead=10:repeat-headers=1:aud=1:scenecut=0:aq-mode=2:aq-strength=1.0:info=0",
+    nullptr);
+
+  // 确保下游看到可流式重组的 Annex-B 字节流，并周期重复 VPS/SPS/PPS
   g_object_set(
     G_OBJECT(parser),
     "config-interval", -1,
     "disable-passthrough", TRUE,
     nullptr);
 
-  GstCaps *h264_caps = gst_caps_new_simple(
-    "video/x-h264",
+  GstCaps *h265_caps = gst_caps_new_simple(
+    "video/x-h265",
     "stream-format", G_TYPE_STRING, "byte-stream",
     "alignment", G_TYPE_STRING, "au",
     nullptr);
 
   g_object_set(G_OBJECT(appsink_),
-    "caps", h264_caps,
+    "caps", h265_caps,
     "max-buffers", 5,
     "drop", FALSE,
     "emit-signals", FALSE,
     "sync", FALSE,
     nullptr);
-  gst_caps_unref(h264_caps);
+  gst_caps_unref(h265_caps);
 
   gst_bin_add_many(GST_BIN(pipeline_), appsrc_, convert, encoder, parser, appsink_, nullptr);
   if (!gst_element_link_many(appsrc_, convert, encoder, parser, appsink_, nullptr)) {
@@ -361,7 +356,7 @@ void VideoEncoderNode::initialize_gstreamer()
   bus_ = gst_element_get_bus(pipeline_);
   RCLCPP_INFO(
     this->get_logger(),
-    "GStreamer encoder ready (%s mode, byte-stream)",
+    "GStreamer HEVC encoder ready (%s mode, byte-stream)",
     low_bitrate_mode ? "low-bitrate" : "low-latency");
 }
 
@@ -375,14 +370,89 @@ void VideoEncoderNode::shutdown_gstreamer()
   }
 }
 
+void VideoEncoderNode::poll_gstreamer_bus()
+{
+  if (!bus_) return;
+
+  while (true) {
+    GstMessage *msg = gst_bus_pop(bus_);
+    if (!msg) break;
+
+    switch (GST_MESSAGE_TYPE(msg)) {
+      case GST_MESSAGE_ERROR: {
+        GError *err = nullptr;
+        gchar *debug = nullptr;
+        gst_message_parse_error(msg, &err, &debug);
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "GStreamer error from %s: %s (%s)",
+          GST_OBJECT_NAME(msg->src),
+          err ? err->message : "unknown",
+          debug ? debug : "no debug");
+        if (err) g_error_free(err);
+        if (debug) g_free(debug);
+        break;
+      }
+      case GST_MESSAGE_WARNING: {
+        GError *err = nullptr;
+        gchar *debug = nullptr;
+        gst_message_parse_warning(msg, &err, &debug);
+        RCLCPP_WARN(
+          this->get_logger(),
+          "GStreamer warning from %s: %s (%s)",
+          GST_OBJECT_NAME(msg->src),
+          err ? err->message : "unknown",
+          debug ? debug : "no debug");
+        if (err) g_error_free(err);
+        if (debug) g_free(debug);
+        break;
+      }
+      case GST_MESSAGE_EOS:
+        RCLCPP_WARN(this->get_logger(), "GStreamer pipeline reached EOS");
+        break;
+      case GST_MESSAGE_STATE_CHANGED:
+        if (GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline_)) {
+          GstState old_state;
+          GstState new_state;
+          GstState pending_state;
+          gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);
+          RCLCPP_INFO(
+            this->get_logger(),
+            "GStreamer pipeline state: %s -> %s (pending %s)",
+            gst_element_state_get_name(old_state),
+            gst_element_state_get_name(new_state),
+            gst_element_state_get_name(pending_state));
+        }
+        break;
+      default:
+        break;
+    }
+
+    gst_message_unref(msg);
+  }
+}
+
 void VideoEncoderNode::initialize_communication()
 {
   try {
-    comm_ = std::make_unique<DoorlockComm>(param_com_port_, param_baudrate_);
-    RCLCPP_INFO(this->get_logger(), "Communication initialized successfully: %s @ %d baud",
-                param_com_port_.c_str(), param_baudrate_);
+    comm_ = std::make_unique<DoorlockComm>(
+      param_com_port_,
+      param_baudrate_,
+      param_send_inner_packet_only_ ?
+        TxFrameMode::INNER_PACKET_ONLY :
+        TxFrameMode::RM_OUTER_FRAME);
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Communication initialized successfully: %s @ %d baud (%s)",
+      param_com_port_.c_str(),
+      param_baudrate_,
+      param_send_inner_packet_only_ ? "inner-only" : "rm-outer");
   } catch (const std::exception & e) {
-    RCLCPP_ERROR(this->get_logger(), "Failed to initialize communication: %s", e.what());
+    comm_.reset();
+    RCLCPP_ERROR(
+      this->get_logger(),
+      "Failed to initialize communication: %s. Video streaming will continue without external comms.",
+      e.what());
   }
 }
 
@@ -518,15 +588,28 @@ cv::Mat VideoEncoderNode::preprocess_image(
 void VideoEncoderNode::image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
   try {
-    // 仅在明确要求低于 60fps 时做抽帧；60fps 模式不主动丢帧
-    if (param_output_fps_ < 60) {
-      const int64_t stamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
-      const int64_t frame_interval_ns = 1000000000LL / std::max(param_output_fps_, 1);
-      const int64_t now_ns = (stamp_ns > 0) ? stamp_ns : this->now().nanoseconds();
-      if (last_encode_stamp_ns_ > 0 && (now_ns - last_encode_stamp_ns_) < frame_interval_ns) {
-        return;
-      }
-      last_encode_stamp_ns_ = now_ns;
+    // Always throttle encoder input to the configured output fps so the
+    // GStreamer pipeline does not outrun the 0x0310 transport budget.
+    const int64_t stamp_ns = rclcpp::Time(msg->header.stamp).nanoseconds();
+    const int64_t frame_interval_ns = 1000000000LL / std::max(param_output_fps_, 1);
+    const int64_t now_ns = (stamp_ns > 0) ? stamp_ns : this->now().nanoseconds();
+    if (last_encode_stamp_ns_ > 0 && (now_ns - last_encode_stamp_ns_) < frame_interval_ns) {
+      return;
+    }
+    last_encode_stamp_ns_ = now_ns;
+
+    image_callback_count_++;
+    const int64_t callback_now_ns = this->now().nanoseconds();
+    if (callback_now_ns - last_image_log_ns_ > 1000000000LL) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Image callback alive: count=%lu stamp=%u.%u size=%ux%u",
+        image_callback_count_,
+        msg->header.stamp.sec,
+        msg->header.stamp.nanosec,
+        msg->width,
+        msg->height);
+      last_image_log_ns_ = callback_now_ns;
     }
 
     cv::Mat input = cv_bridge::toCvShare(msg, "bgr8")->image;
@@ -554,7 +637,9 @@ void VideoEncoderNode::image_callback(const sensor_msgs::msg::Image::SharedPtr m
     }
     
     push_frame_to_gstreamer(processed);
+    poll_gstreamer_bus();
     pull_stream_and_packetize();
+    poll_gstreamer_bus();
     
     frame_count_++;
     
@@ -584,21 +669,118 @@ void VideoEncoderNode::push_frame_to_gstreamer(const cv::Mat & frame)
   gst_buffer_unref(buffer);
 }
 
-// 150B 分包 + 带宽窗口限速 + 队列时延上限
+// 固定 20ms 发送一包（8字节头部 + 292字节视频数据）
+void VideoEncoderNode::send_packet_timer_callback()
+{
+  constexpr size_t kHeaderBytes = 2 + 2 + 4;  // frame_no(2) + frag_no(2) + total_bytes(4)
+  constexpr size_t kPayloadBytes = 292;       // 纯视频数据部分
+  constexpr size_t kPacketBytes = kHeaderBytes + kPayloadBytes;  // 300字节
+
+  doorlock_sniper::msg::VideoPacket pkt;
+  pkt.frame_no = 0;
+  pkt.frag_no = 0;
+  pkt.total_bytes = 0;
+  pkt.payload.fill(0);
+  if (param_fixed_test_payload_mode_) {
+    constexpr size_t kSyntheticFrameBytes = 64;
+    const uint16_t frame_no = current_frame_no_++;
+    pkt.frame_no = frame_no;
+    pkt.frag_no = 0;
+    pkt.total_bytes = kSyntheticFrameBytes;
+
+    std::ostringstream oss;
+    oss << "RM0310-TEST frame=" << frame_no
+        << " tick=" << packet_sequence_id_;
+    const std::string text = oss.str();
+    const size_t text_size = std::min(text.size(), kSyntheticFrameBytes);
+    memcpy(pkt.payload.data(), text.data(), text_size);
+    for (size_t i = text_size; i < kSyntheticFrameBytes; ++i) {
+      pkt.payload[i] = static_cast<uint8_t>((frame_no + i) & 0xFF);
+    }
+  } else {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    // 如果当前没有正在发送的帧，从队列取一帧
+    if (current_send_frame_.empty() && !frame_queue_.empty()) {
+      current_send_frame_ = std::move(frame_queue_.front());
+      frame_queue_.pop_front();
+      current_send_offset_ = 0;
+      current_frag_no_ = 0;
+    }
+
+    if (!current_send_frame_.empty()) {
+      size_t remaining = current_send_frame_.size() - current_send_offset_;
+      size_t copy_size = std::min(kPayloadBytes, remaining);
+
+      pkt.frame_no = current_frame_no_;
+      pkt.frag_no = current_frag_no_++;
+      pkt.total_bytes = static_cast<uint32_t>(current_send_frame_.size());
+      memcpy(pkt.payload.data(), current_send_frame_.data() + current_send_offset_, copy_size);
+      current_send_offset_ += copy_size;
+
+      // 当前帧是否发送完毕
+      if (current_send_offset_ >= current_send_frame_.size()) {
+        current_send_frame_.clear();
+        current_send_offset_ = 0;
+        current_frag_no_ = 0;
+        current_frame_no_++;
+      }
+    }
+  }
+
+  if (pkt.total_bytes == 0) {
+    const int64_t now_ns = this->now().nanoseconds();
+    if (now_ns - last_send_idle_log_ns_ > 1000000000LL) {
+      size_t queued_frames = 0;
+      size_t queued_bytes = 0;
+      {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        queued_frames = frame_queue_.size();
+        for (const auto &f : frame_queue_) queued_bytes += f.size();
+        if (!current_send_frame_.empty()) queued_bytes += current_send_frame_.size();
+      }
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Send idle: no packet ready, aus=%lu queued_frames=%zu queued_bytes=%zuB current_offset=%zu",
+        encoded_au_count_, queued_frames, queued_bytes, current_send_offset_);
+      last_send_idle_log_ns_ = now_ns;
+    }
+    return;
+  }
+
+  if (!param_fixed_test_payload_mode_) {
+    packet_pub_->publish(pkt);
+  }
+
+  if (comm_) {
+    std::array<uint8_t, kPacketBytes> raw_packet;
+    raw_packet.fill(0);
+    raw_packet[0] = pkt.frame_no & 0xFF;
+    raw_packet[1] = (pkt.frame_no >> 8) & 0xFF;
+    raw_packet[2] = pkt.frag_no & 0xFF;
+    raw_packet[3] = (pkt.frag_no >> 8) & 0xFF;
+    raw_packet[4] = pkt.total_bytes & 0xFF;
+    raw_packet[5] = (pkt.total_bytes >> 8) & 0xFF;
+    raw_packet[6] = (pkt.total_bytes >> 16) & 0xFF;
+    raw_packet[7] = (pkt.total_bytes >> 24) & 0xFF;
+    memcpy(raw_packet.data() + kHeaderBytes, pkt.payload.data(), kPayloadBytes);
+    comm_->send(raw_packet.data(), kPacketBytes);
+  }
+}
+
+// 从 appsink 拉取编码数据并加入 frame_queue_，由 20ms 定时器统一发送
 void VideoEncoderNode::pull_stream_and_packetize()
 {
   if (!appsink_) return;
 
-  const size_t packet_bytes = static_cast<size_t>(param_packet_size_);
-  const int64_t window_ns = static_cast<int64_t>(param_bandwidth_window_s_ * 1e9);
-  const size_t window_limit_bytes = static_cast<size_t>(
-    param_bandwidth_limit_kbytes_ * 1000.0 * param_bandwidth_window_s_);
   const size_t max_backlog_bytes = static_cast<size_t>(
     param_bandwidth_limit_kbytes_ * 1000.0 * param_max_tx_delay_s_);
+  bool pulled_any_sample = false;
 
   while (true) {
     GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(appsink_), 0);
     if (!sample) break;
+    pulled_any_sample = true;
 
     GstBuffer *buffer = gst_sample_get_buffer(sample);
     if (!buffer) {
@@ -610,86 +792,62 @@ void VideoEncoderNode::pull_stream_and_packetize()
     if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
       std::lock_guard<std::mutex> lock(buffer_mutex_);
 
-      // 追加到流缓冲区
-      size_t old_size = stream_buffer_.size();
-      stream_buffer_.resize(old_size + map.size);
-      memcpy(stream_buffer_.data() + old_size, map.data, map.size);
+      // h265parse alignment=au 保证每个 buffer 是一整帧，直接入队
+      std::vector<uint8_t> frame_data(map.size);
+      memcpy(frame_data.data(), map.data, map.size);
+      frame_queue_.push_back(std::move(frame_data));
+      encoded_au_count_++;
 
-      // 2秒滑动窗口硬限速：任何窗口内总字节不超过 window_limit_bytes
-      while (stream_buffer_.size() >= packet_bytes) {
-        const int64_t now_ns = this->now().nanoseconds();
-        while (!sent_window_.empty() && (now_ns - sent_window_.front().first) > window_ns) {
-          sent_window_bytes_ -= sent_window_.front().second;
-          sent_window_.pop_front();
-        }
+      // 排队时延上限：超限时从队列头部丢弃旧帧
+      size_t total_bytes = 0;
+      for (const auto &f : frame_queue_) total_bytes += f.size();
+      if (!current_send_frame_.empty()) total_bytes += current_send_frame_.size();
 
-        if (sent_window_bytes_ + packet_bytes > window_limit_bytes) {
-          break;
-        }
-
-        doorlock_sniper::msg::VideoPacket pkt;
-        pkt.sequence_id = packet_sequence_id_++;
-        pkt.timestamp_ns = now_ns;
-
-        pkt.data.fill(0);
-        memcpy(pkt.data.data(), stream_buffer_.data(), param_packet_size_);
-
-        packet_pub_->publish(pkt);
-        sent_window_.emplace_back(now_ns, packet_bytes);
-        sent_window_bytes_ += packet_bytes;
-
-        memmove(stream_buffer_.data(), 
-                stream_buffer_.data() + param_packet_size_,
-                stream_buffer_.size() - param_packet_size_);
-        stream_buffer_.resize(stream_buffer_.size() - param_packet_size_);
-      }
-
-      // 排队时延上限：防止突发造成长延时。超限时丢弃旧数据。
-      if (stream_buffer_.size() > max_backlog_bytes) {
-        const size_t target_drop = stream_buffer_.size() - max_backlog_bytes;
-        size_t drop_bytes = target_drop;
-
-        // 尽量对齐到下一个 Annex-B 起始码，减少解码错误持续时间
-        for (size_t i = target_drop; i + 4 < stream_buffer_.size(); ++i) {
-          const bool start_code_3 = (stream_buffer_[i] == 0 && stream_buffer_[i + 1] == 0 &&
-                                     stream_buffer_[i + 2] == 1);
-          const bool start_code_4 = (stream_buffer_[i] == 0 && stream_buffer_[i + 1] == 0 &&
-                                     stream_buffer_[i + 2] == 0 && stream_buffer_[i + 3] == 1);
-          if (start_code_3 || start_code_4) {
-            drop_bytes = i;
-            break;
-          }
-        }
-
-        memmove(
-          stream_buffer_.data(), stream_buffer_.data() + drop_bytes, stream_buffer_.size() - drop_bytes);
-        stream_buffer_.resize(stream_buffer_.size() - drop_bytes);
-
-        dropped_bytes_ += drop_bytes;
+      while (total_bytes > max_backlog_bytes && !frame_queue_.empty()) {
+        size_t dropped = frame_queue_.front().size();
+        frame_queue_.pop_front();
+        total_bytes -= dropped;
+        dropped_bytes_ += dropped;
         dropped_events_++;
         if (dropped_events_ % 20 == 1) {
           RCLCPP_WARN(
             this->get_logger(),
             "TX backlog clipped: dropped=%zuB backlog=%zuB total_dropped=%luB events=%u",
-            drop_bytes, stream_buffer_.size(), dropped_bytes_, dropped_events_);
+            dropped, total_bytes, dropped_bytes_, dropped_events_);
         }
       }
 
       const int64_t telemetry_ns = this->now().nanoseconds();
       if (telemetry_ns - last_telemetry_ns_ > 1000000000LL) {
-        const double window_kbytes = static_cast<double>(sent_window_bytes_) / 1000.0;
-        const double avg_kbytes_per_s = window_kbytes / param_bandwidth_window_s_;
         RCLCPP_INFO(
           this->get_logger(),
-          "TX stats: window=%.2f/%.2fkB avg=%.2fkB/s backlog=%zuB dropped=%luB",
-          window_kbytes, static_cast<double>(window_limit_bytes) / 1000.0,
-          avg_kbytes_per_s, stream_buffer_.size(), dropped_bytes_);
+          "Encoder stats: aus=%lu backlog=%zuB dropped=%luB",
+          encoded_au_count_, total_bytes, dropped_bytes_);
         last_telemetry_ns_ = telemetry_ns;
       }
 
       gst_buffer_unmap(buffer, &map);
     }
     gst_sample_unref(sample);
+  }
+
+  if (!pulled_any_sample) {
+    const int64_t now_ns = this->now().nanoseconds();
+    if (now_ns - last_appsink_empty_log_ns_ > 1000000000LL) {
+      size_t queued_frames = 0;
+      size_t queued_bytes = 0;
+      {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        queued_frames = frame_queue_.size();
+        for (const auto &f : frame_queue_) queued_bytes += f.size();
+        if (!current_send_frame_.empty()) queued_bytes += current_send_frame_.size();
+      }
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Encoder idle: no appsink sample yet, aus=%lu queued_frames=%zu queued_bytes=%zuB",
+        encoded_au_count_, queued_frames, queued_bytes);
+      last_appsink_empty_log_ns_ = now_ns;
+    }
   }
 }
 

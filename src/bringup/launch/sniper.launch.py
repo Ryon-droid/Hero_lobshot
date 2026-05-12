@@ -22,11 +22,13 @@ def generate_launch_description():
     dump_save_decoder = True          # 保存解码端窗口
 
     # 码率策略（单位：kB/s）
-    target_bitrate_kbytes = 10.0       # 目标编码码率
-    hard_max_bitrate_kbytes = 14.0     # 传输硬上限（由发送窗口限速实现）
+    target_bitrate_kbytes = 10.0       # 目标编码码率；贴近文档建议值，提升低码率细节
+    hard_max_bitrate_kbytes = 12.0     # 传输硬上限（由发送窗口限速实现）
     target_bitrate_kbps = int(target_bitrate_kbytes * 8.0)  # x264 参数单位是 kbps
-    x264_preset = 'veryslow'           # x264 速度预设：slow 会比veryslow更省时延但画质/压缩效率略降
+    x264_preset = 'faster'             # 当前实现实际使用 x265enc；进一步减轻本机编码负担，换取更稳定 AU 产出率
     encode_size = 300
+    send_inner_packet_only = False     # True: 只发送300B内层视频包；False: 发送完整RM外层协议包
+    fixed_test_payload_mode = False    # True: 绕过视频编码，发送固定0x0310测试负载，专门验证官方链路转发
 
     # 编码端容器（相机 + 编码器，同进程零拷贝）
     encoder_container = ComposableNodeContainer(
@@ -51,11 +53,12 @@ def generate_launch_description():
                 name='video_encoder',
                 parameters=[
                     {'input_topic': '/image_raw'},                       # 输入图像话题
-                    {'target_bitrate': target_bitrate_kbps},             # 目标编码码率(kbps)，5kB/s -> 40kbps
+                    {'target_bitrate': target_bitrate_kbps},             # 目标编码码率(kbps)，8kB/s -> 64kbps
                     {'x264_preset': x264_preset},                        # x264 preset: auto/ultrafast/.../veryslow
-                    {'output_fps': 60},                                  # 输出帧率
+                    {'output_fps': 40},                                  # 输出帧率：给 48Hz 固定发送链路留出空槽，降低持续积压风险
                     {'packet_size': 300},                                # 固定分包大小(byte)
-                    {'enable_display': True},                            # 编码端调试显示开关
+                    {'fixed_test_payload_mode': fixed_test_payload_mode}, # 固定测试负载模式
+                    {'enable_display': False},                           # 关闭本地显示，优先保证编码与发送帧率
                     {'debug_dump_enable': debug_dump_enable},            # 开启后每N帧保存编码端窗口画面
                     {'debug_dump_every_n_frames': debug_dump_every_n_frames},  # 编码端保存间隔(帧)
                     {'debug_dump_save_raw': dump_save_raw},              # 编码端 Raw 窗口保存开关
@@ -69,7 +72,7 @@ def generate_launch_description():
                     {'motion_threshold': 14},                            # 运动检测阈值
                     {'motion_erode_px': 2},                              # 运动掩码腐蚀像素(y)
                     {'motion_dilate_px': 6},                             # 运动掩码膨胀像素(x)
-                    {'motion_trail_frames': 90},                         # 拖影历史帧数
+                    {'motion_trail_frames': 8},                          # 拖影历史帧数；保留轨迹增强，同时降低逐帧处理开销
                     {'trail_disable_motion_ratio': 0.30},                # 全局运动比例超阈值时临时禁用拖影显示
                     {'bg_update_alpha': 0.01},                           # 背景模型更新速度
                     {'bg_blur_sigma': 1.8},                              # 静态区模糊强度
@@ -77,7 +80,8 @@ def generate_launch_description():
                     {'force_monochrome': False},                         # 强制全画面灰度
                     {'bandwidth_limit_kbytes': hard_max_bitrate_kbytes}, # 发送硬上限(kB/s)
                     {'bandwidth_window_s': 2.0},                         # 限速滑动窗口时长(s)
-                    {'max_tx_delay_s': 1.0}                              # 发送队列最大允许时延(s)
+                    {'max_tx_delay_s': 1.0},                             # 发送队列最大允许时延(s)
+                    {'send_inner_packet_only': send_inner_packet_only}   # 是否绕过RM外层，仅发300B内层包
                 ],
                 extra_arguments=[{'use_intra_process_comms': True}]      # 启用进程内零拷贝
             )

@@ -3,7 +3,7 @@
   <name>doorlock_sniper</name>
   <version>0.1.0</version>
   <description>
-    Doorlock sniper system - Video encoding node with H264 compression and chunking.
+    Doorlock sniper system - Video encoding node with HEVC compression and chunking.
     Composable node for zero-copy intra-process communication with camera driver.
   </description>
   <maintainer email="dev@example.com">developer</maintainer>

@@ -59,6 +59,11 @@ class VideoDecoderNode(Node):
         self.gap_count = 0
         self.last_seq = None
         
+        # 帧分片重组状态（新格式）
+        self.current_frame_no = None
+        self.current_frame_data = bytearray()
+        self.current_frame_total_bytes = 0
+        
         # 显示队列
         if self.display:
             self.frame_queue = queue.Queue(maxsize=3)
@@ -82,7 +87,7 @@ class VideoDecoderNode(Node):
         self.get_logger().info(f'Decoder started: subscribing to {topic}')
 
     def _reset_decoder(self, *, log: bool = True, reason: str = ''):
-        self.codec = av.CodecContext.create('h264', 'r')
+        self.codec = av.CodecContext.create('hevc', 'r')
         self.codec.thread_type = 'FRAME'
         self.codec.flags |= av.codec.context.Flags.LOW_DELAY
         if log:
@@ -106,33 +111,64 @@ class VideoDecoderNode(Node):
             self.get_logger().info(f'Decoded {self.frame_count} frames')
         
     def _packet_callback(self, msg):
-        """接收 150byte 分片，先 parse，再 decode。"""
+        """接收新格式分片（158字节：8字节头部 + 150字节视频数据），重组帧后再解码。"""
         self.packet_count += 1
 
-        # 丢包检测
-        if self.last_seq is not None and msg.sequence_id != self.last_seq + 1:
-            self.gap_count += 1
-            self.get_logger().warn(
-                f'Gap detected: {self.last_seq} -> {msg.sequence_id}, reset decoder')
-            # 任意 150B 分片丢失都会破坏码流同步，直接重置等待下一组 SPS/PPS + IDR
-            self._reset_decoder(reason='sequence gap')
-        self.last_seq = msg.sequence_id
+        # 解析新格式字段（小端序）
+        frame_no = msg.frame_no
+        frag_no = msg.frag_no
+        total_bytes = msg.total_bytes
+        payload = bytes(msg.payload)  # 150字节纯视频数据
 
-        chunk = bytes(msg.data)
+        if total_bytes <= 0:
+            return
 
+        # 检测帧序号跳跃（帧级别的丢包检测）
+        if self.current_frame_no is not None and frame_no != self.current_frame_no:
+            # 新帧到来，先处理之前累积的数据（如果有的话）
+            if len(self.current_frame_data) > 0:
+                self._decode_frame_data(bytes(self.current_frame_data))
+            self.current_frame_no = frame_no
+            self.current_frame_data = bytearray()
+            self.current_frame_total_bytes = total_bytes
+
+        # 更新当前帧号
+        if self.current_frame_no is None:
+            self.current_frame_no = frame_no
+            self.current_frame_total_bytes = total_bytes
+
+        # 累加150字节视频数据到当前帧缓冲区
+        self.current_frame_data.extend(payload)
+
+        # 检查是否已收集完一帧数据
+        if len(self.current_frame_data) >= self.current_frame_total_bytes:
+            # 提取完整帧数据
+            frame_data = bytes(self.current_frame_data[:self.current_frame_total_bytes])
+            # 保存剩余数据（可能是下一帧的开头）
+            self.current_frame_data = self.current_frame_data[self.current_frame_total_bytes:]
+            # 解码
+            self._decode_frame_data(frame_data)
+            # 重置状态准备下一帧
+            self.current_frame_no = None
+            self.current_frame_total_bytes = 0
+
+        if self.packet_count % 600 == 0:
+            self.get_logger().info(
+                f'Rx packets={self.packet_count} decoded_frames={self.frame_count} '
+                f'current_frame={self.current_frame_no} frag={frag_no} '
+                f'buf_size={len(self.current_frame_data)}/{self.current_frame_total_bytes}')
+
+    def _decode_frame_data(self, frame_data):
+        """解码完整的帧数据"""
         try:
-            parsed_packets = self.codec.parse(chunk)
+            parsed_packets = self.codec.parse(frame_data)
             self.parsed_packet_count += len(parsed_packets)
             for packet in parsed_packets:
                 for frame in self.codec.decode(packet):
                     self._handle_decoded_frame(frame)
         except av.AVError as e:
             self.get_logger().debug(f'Decode error: {e!s}')
-
-        if self.packet_count % 600 == 0:
-            self.get_logger().info(
-                f'Rx packets={self.packet_count} parsed_h264={self.parsed_packet_count} '
-                f'decoded_frames={self.frame_count} gaps={self.gap_count}')
+            self._reset_decoder(reason='decode error')
     
     def _display_loop(self):
         """独立线程显示"""
@@ -207,7 +243,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
